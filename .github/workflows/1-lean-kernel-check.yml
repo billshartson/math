@@ -1,0 +1,76 @@
+name: lean-kernel-check
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache || true
+          df -h /
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          sparse-checkout: lean
+      - name: Install elan and Lean toolchain
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4:v4.34.1
+      - name: Restore previous build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            lean/.lake/build
+            lean/.lake/packages/PrimeNumberTheoremAnd/.lake/build
+            lean/.lake/packages/rellich-kondrachov/.lake/build
+          key: leanbuild-${{ github.run_number }}
+          restore-keys: leanbuild-
+      - name: Resolve dependencies and fetch mathlib cache
+        working-directory: lean
+        run: |
+          lake update
+          lake exe cache get
+      - name: Build solution modules (time-boxed)
+        working-directory: lean
+        run: |
+          set +e
+          timeout 4h30m lake build OAI.NumberTheory.DirichletL.Nonvanishing OAI.NumberTheory.DirichletL.Hecke.Nonvanishing OAI.NumberTheory.SiegelZeros.Main
+          echo "build_exit=$?" >> "$GITHUB_ENV"
+          exit 0
+      - name: Save build cache
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            lean/.lake/build
+            lean/.lake/packages/PrimeNumberTheoremAnd/.lake/build
+            lean/.lake/packages/rellich-kondrachov/.lake/build
+          key: leanbuild-${{ github.run_number }}
+      - name: Print axioms of the main theorems
+        if: env.build_exit == '0'
+        working-directory: lean
+        run: |
+          cat > CheckAxioms.lean <<'LEANEOF'
+          import OAI.NumberTheory.DirichletL.Nonvanishing
+          import OAI.NumberTheory.DirichletL.Hecke.Nonvanishing
+          import OAI.NumberTheory.SiegelZeros.Main
+          #print axioms OAI.riemannZeta_ne_zero_of_seven_eighths_lt_re
+          #print axioms OAI.DirichletCharacter.LFunction_ne_zero_of_seven_eighths_lt_re
+          #print axioms OAI.SevenEighths.HeckeFamily.LFunction_ne_zero_of_seven_eighths_lt_re
+          #print axioms OAI.SiegelZeros.WeightedTorusJets.exists_absolute_real_zero_gap
+          #print axioms OAI.SiegelZeros.WeightedTorusJets.dirichletRealZeroBound_proof
+          LEANEOF
+          set -o pipefail
+          lake env lean CheckAxioms.lean 2>&1 | tee axioms.out
+          if grep -q sorryAx axioms.out; then echo "SORRYAX FOUND"; exit 1; fi
+      - name: Upload axiom output
+        if: env.build_exit == '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: axioms
+          path: lean/axioms.out
